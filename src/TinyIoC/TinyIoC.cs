@@ -86,6 +86,79 @@ namespace TinyIoC
 	using Windows.UI.Xaml.Shapes;
 #endif
 
+    public abstract class TinyIoCArgument
+    {
+        public static T Resolve<T>(string name = "") where T : class
+        {
+            throw new NotImplementedException();
+        }
+
+        public static T Constant<T>(T constant)
+        {
+            throw new NotImplementedException();
+        }
+
+        private readonly string _parameterName;
+
+        public string ParameterName
+        {
+            get { return _parameterName; }
+        }
+
+        protected TinyIoCArgument(string parameterName)
+        {
+            _parameterName = parameterName;
+        }
+
+        public KeyValuePair<string, object> GetKeyValuePair()
+        {
+            return new KeyValuePair<string, object>(this.ParameterName, this.GetValue());
+        }
+
+        protected abstract object GetValue();
+    }
+
+
+    public class ConstantTinyIoCArgument : TinyIoCArgument
+    {
+        private readonly object _constant;
+
+        public ConstantTinyIoCArgument(string parameterName, object constant)
+            : base(parameterName)
+        {
+            _constant = constant;
+        }
+
+        protected override object GetValue()
+        {
+            return _constant;
+        }
+    }
+
+
+    public class ResolvingTinyIoCArgument : TinyIoCArgument
+    {
+        private readonly TinyIoCContainer _container;
+        private readonly Type _resolveType;
+        private readonly string _name;
+
+        public ResolvingTinyIoCArgument(string parameterName,
+                                               TinyIoCContainer container,
+                                               Type resolveType,
+                                               String name)
+            : base(parameterName)
+        {
+            _container = container;
+            _resolveType = resolveType;
+            _name = name;
+        }
+
+        protected override object GetValue()
+        {
+            return _container.Resolve(_resolveType,_name);
+        }
+    }
+
     #region SafeDictionary
 #if READER_WRITER_LOCK_SLIM
     public class SafeDictionary<TKey, TValue> : IDisposable
@@ -927,9 +1000,62 @@ namespace TinyIoC
                     throw new TinyIoCConstructorResolutionException(typeof(RegisterType));
 
                 currentFactory.SetConstructor(constructorInfo);
-
+                var arguments = GetTinyIoCArguments(newExpression).ToArray();
+                currentFactory.SetConstructorArguments(arguments);
                 return this;
             }
+
+            private IEnumerable<TinyIoCArgument> GetTinyIoCArguments(NewExpression newExpression)
+            {
+                var arguments = newExpression.Arguments;
+                if(arguments.Count == 0)
+                    yield break;
+
+                var methods = typeof(TinyIoCArgument).GetMethods(BindingFlags.Public | BindingFlags.Static);
+
+                var constructor = newExpression.Constructor;
+                var parameters = constructor.GetParameters();
+                for (var index = 0; index < arguments.Count; index++)
+                {
+                    var methodCall = arguments[index] as MethodCallExpression;
+                    if (methodCall == null || methodCall.Method.DeclaringType != typeof(TinyIoCArgument))
+                        continue;
+                    var parameterName = parameters[index].Name;
+                    switch (methodCall.Method.Name)
+                    {
+                        case "Resolve":
+                        {
+                            var constantExpression = methodCall.Arguments[0] as ConstantExpression;
+                            if (constantExpression != null)
+                            {
+                                var name = constantExpression.Value as String;
+                                yield return new ResolvingTinyIoCArgument(parameterName,
+                                                                                _Container,
+                                                                                methodCall.Type,
+                                                                                name);
+                            }
+                            break;
+                        }
+                        case "Constant":
+                        {
+                            Object constant;
+                            var constantExpression = methodCall.Arguments[0] as ConstantExpression;
+                            if (constantExpression != null)
+                            {
+                                constant = constantExpression.Value;
+                            }
+                            else
+                            {
+                                var lambda = Expression.Lambda(methodCall.Arguments[0]);
+                                constant = lambda.Compile().DynamicInvoke();
+                            }
+                            yield return new ConstantTinyIoCArgument(parameterName, constant);
+                            break;
+                        }
+                    }
+                }
+            }
+
 #endif
             /// <summary>
             /// Switches to a custom lifetime manager factory if possible.
@@ -2457,6 +2583,13 @@ namespace TinyIoC
                 Constructor = constructor;
             }
 
+            public virtual void SetConstructorArguments(IEnumerable<TinyIoCArgument> arguments)
+            {
+                Arguments = arguments;
+            }
+
+            protected IEnumerable<TinyIoCArgument> Arguments { get; private set; }
+
             public virtual ObjectFactoryBase GetFactoryForChildContainer(Type type, TinyIoCContainer parent, TinyIoCContainer child)
             {
                 return this;
@@ -2492,7 +2625,13 @@ namespace TinyIoC
             {
                 try
                 {
-                    return container.ConstructType(requestedType, this.registerImplementation, Constructor, parameters, options);
+                    var argumentValues = Arguments.Where(p => !parameters.ContainsKey(p.ParameterName))
+                                                  .Select(p => p.GetKeyValuePair())
+                                                  .Concat(parameters)
+                                                  .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+                    var namedParameterOverloads = new NamedParameterOverloads(argumentValues);
+
+                    return container.ConstructType(requestedType, this.registerImplementation, Constructor, namedParameterOverloads, options);
                 }
                 catch (TinyIoCResolutionException ex)
                 {
@@ -2577,6 +2716,11 @@ namespace TinyIoC
             {
                 throw new TinyIoCConstructorResolutionException("Constructor selection is not possible for delegate factory registrations");
             }
+
+            public override void SetConstructorArguments(IEnumerable<TinyIoCArgument> arguments)
+            {
+                throw new TinyIoCConstructorResolutionException("Constructor argument is not possible for delegate factory registrations");
+            }
         }
 
         /// <summary>
@@ -2645,6 +2789,11 @@ namespace TinyIoC
             {
                 throw new TinyIoCConstructorResolutionException("Constructor selection is not possible for delegate factory registrations");
             }
+
+            public override void SetConstructorArguments(IEnumerable<TinyIoCArgument> arguments)
+            {
+                throw new TinyIoCConstructorResolutionException("Constructor selection is not possible for delegate factory registrations");
+            }
         }
 
         /// <summary>
@@ -2700,6 +2849,11 @@ namespace TinyIoC
             }
 
             public override void SetConstructor(ConstructorInfo constructor)
+            {
+                throw new TinyIoCConstructorResolutionException("Constructor selection is not possible for instance factory registrations");
+            }
+
+            public override void SetConstructorArguments(IEnumerable<TinyIoCArgument> arguments)
             {
                 throw new TinyIoCConstructorResolutionException("Constructor selection is not possible for instance factory registrations");
             }
@@ -2783,6 +2937,11 @@ namespace TinyIoC
                 throw new TinyIoCConstructorResolutionException("Constructor selection is not possible for instance factory registrations");
             }
 
+            public override void SetConstructorArguments(IEnumerable<TinyIoCArgument> arguments)
+            {
+                throw new TinyIoCConstructorResolutionException("Constructor selection is not possible for instance factory registrations");
+            }
+
             public void Dispose()
             {
                 var disposable = _instance.Target as IDisposable;
@@ -2830,8 +2989,18 @@ namespace TinyIoC
 
                 lock (SingletonLock)
                     if (_Current == null)
-                        _Current = container.ConstructType(requestedType, this.registerImplementation, Constructor, options);
+                    {
+                        var argumentValues = Arguments.Select(p => p.GetKeyValuePair())
+                                                      .ToDictionary(kvp => kvp.Key,
+                                                                    kvp => kvp.Value);
+                        var namedParameterOverloads = new NamedParameterOverloads(argumentValues);
 
+                        _Current = container.ConstructType(requestedType,
+                                                           this.registerImplementation,
+                                                           Constructor,
+                                                           namedParameterOverloads,
+                                                           options);
+                    }
                 return _Current;
             }
 
@@ -2921,7 +3090,12 @@ namespace TinyIoC
                     current = _LifetimeProvider.GetObject();
                     if (current == null)
                     {
-                        current = container.ConstructType(requestedType, this.registerImplementation, Constructor, options);
+                        var argumentValues = Arguments.Select(p => p.GetKeyValuePair())
+                                                      .ToDictionary(kvp => kvp.Key,
+                                                                    kvp => kvp.Value);
+                        var namedParameterOverloads = new NamedParameterOverloads(argumentValues);
+
+                        current = container.ConstructType(requestedType, this.registerImplementation, Constructor, namedParameterOverloads, options);
                         _LifetimeProvider.SetObject(current);
                     }
                 }
