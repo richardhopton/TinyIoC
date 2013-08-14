@@ -81,6 +81,26 @@ namespace TinyIoC.Tests
         }
 
         [TestMethod]
+        public void NestedClassDependencies_CorrectlyRegistered_ResolvesRoot_UsingConstructor()
+        {
+            var container = UtilityMethods.GetContainer();
+            container.Register<NestedClassDependencies.Service1>();
+            container.Register<NestedClassDependencies.Service2>();
+            container.Register<NestedClassDependencies.Service3>();
+            container.Register<NestedClassDependencies.RootClass>()
+                     .UsingConstructor(args => new NestedClassDependencies.RootClass(null,
+                                                                                     null,
+                                                                                     args.Constant("Test"),
+                                                                                     args.Constant(5)));
+
+            var result = container.Resolve<NestedClassDependencies.RootClass>();
+
+            Assert.IsInstanceOfType(result, typeof(NestedClassDependencies.RootClass));
+            Assert.AreEqual("Test", result.StringProperty);
+            Assert.AreEqual(5, result.IntProperty);
+        }
+
+        [TestMethod]
         public void NestedClassDependencies_MissingService3Registration_ResolvesRootResolutionOn()
         {
             var container = UtilityMethods.GetContainer();
@@ -133,6 +153,21 @@ namespace TinyIoC.Tests
             stateManager.Init();
 
             Assert.IsInstanceOfType(mainView.LoadedView, typeof(SplashView));
+        }
+
+        [TestMethod]
+        public void Dependency_Hierarchy_With_Named_Parameters_Resolves_All_Correctly()
+        {
+            var container = UtilityMethods.GetContainer();
+            var mainView = new MainView();
+            container.Register<IView, MainView>(mainView, "MainView");
+            container.Register<IView, SplashView>("SplashView").UsingConstructor(() => new SplashView());
+            container.Register<ViewBag>()
+                     .UsingConstructor(args => new ViewBag(args.Resolve<IView>("SplashView"),
+                                                           args.Resolve<IView>("MainView")));
+            var viewBag = container.Resolve<ViewBag>();
+            Assert.IsInstanceOfType(viewBag.View1, typeof(SplashView));
+            Assert.IsInstanceOfType(viewBag.View2, typeof(MainView));
         }
 
         [TestMethod]
